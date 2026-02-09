@@ -11,10 +11,7 @@ class BookingBase(BaseModel):
     vehicle_id: str
     start_date: date
     end_date: date
-    pickup_branch_id: str
-    dropoff_branch_id: str
     insurance_selected: bool = False
-    payment_mode: str = Field(default="cash", pattern=r'^(cash|card)$')
     
     @validator('end_date')
     def validate_dates(cls, v, values):
@@ -31,7 +28,18 @@ class BookingBase(BaseModel):
 
 class BookingCreate(BookingBase):
     """Create booking request"""
+    pickup_location: Optional[str] = None
+    dropoff_location: Optional[str] = None
+    pickup_branch_id: Optional[str] = None
+    dropoff_branch_id: Optional[str] = None
+    total_price: Optional[float] = None
+    daily_price: Optional[float] = None
+    insurance_amount: Optional[float] = 0
+    payment_mode: str = Field(default="cash", pattern=r'^(cash|card)$')
     quote_id: Optional[str] = Field(None, description="Optional price quote ID to link")
+    guest_name: Optional[str] = None
+    guest_email: Optional[str] = None
+    guest_phone: Optional[str] = None
 
 
 class BookingUpdate(BaseModel):
@@ -42,14 +50,23 @@ class BookingUpdate(BaseModel):
     payment_status: Optional[str] = Field(None, pattern=r'^(pending|completed|refunded|failed)$')
 
 
-class BookingResponse(BookingBase):
+class BookingResponse(BaseModel):
     """Booking response with additional fields"""
     id: str
     guest_id: str
-    total_price: float
-    insurance_amount: float
-    status: str
-    payment_status: str
+    vehicle_id: str
+    start_date: date
+    end_date: date
+    pickup_location: Optional[str] = None
+    dropoff_location: Optional[str] = None
+    pickup_branch_id: Optional[str] = None
+    dropoff_branch_id: Optional[str] = None
+    insurance_selected: bool = False
+    payment_mode: Optional[str] = "cash"
+    total_price: float = 0
+    insurance_amount: float = 0
+    status: str = "pending"
+    payment_status: str = "pending"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     

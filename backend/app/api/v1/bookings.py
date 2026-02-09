@@ -99,8 +99,10 @@ def booking_doc_to_response(doc_id: str, doc_data: Dict[str, Any]) -> Optional[B
             vehicle_id=doc_data.get('vehicle_id', 'unknown'),
             start_date=start_date,
             end_date=end_date,
-            pickup_branch_id=doc_data.get('pickup_branch_id') or doc_data.get('pickup_location', ''),
-            dropoff_branch_id=doc_data.get('dropoff_branch_id') or doc_data.get('dropoff_location', ''),
+            pickup_location=doc_data.get('pickup_location', ''),
+            dropoff_location=doc_data.get('dropoff_location', ''),
+            pickup_branch_id=doc_data.get('pickup_branch_id'),
+            dropoff_branch_id=doc_data.get('dropoff_branch_id'),
             insurance_selected=doc_data.get('insurance_selected', False),
             payment_mode=doc_data.get('payment_mode', 'cash'),
             total_price=float(doc_data.get('total_price', 0.0)),
@@ -373,31 +375,55 @@ async def create_booking(
                 detail=f"Vehicle not available for selected dates. Conflicting bookings: {len(conflicts)}"
             )
         
-        # Calculate total price
-        total_price = await calculate_booking_price(
-            booking.vehicle_id,
-            booking.start_date,
-            booking.end_date
-        )
+        # Calculate total price (use frontend-provided price if available, otherwise compute)
+        if booking.total_price and booking.total_price > 0:
+            total_price = booking.total_price
+        else:
+            total_price = await calculate_booking_price(
+                booking.vehicle_id,
+                booking.start_date,
+                booking.end_date
+            )
+        
+        # Insurance amount
+        insurance_amount = booking.insurance_amount or 0
         
         # Generate booking ID
         booking_id = str(uuid.uuid4())
+        
+        # Resolve pickup/dropoff location
+        pickup_location = booking.pickup_location or booking.pickup_branch_id or ''
+        dropoff_location = booking.dropoff_location or booking.dropoff_branch_id or ''
         
         # Prepare booking data
         booking_data = {
             'id': booking_id,
             'user_id': guest_id,
+            'guest_id': guest_id,
             'vehicle_id': booking.vehicle_id,
             'start_date': booking.start_date.isoformat(),
             'end_date': booking.end_date.isoformat(),
             'total_price': total_price,
+            'insurance_selected': booking.insurance_selected,
+            'insurance_amount': insurance_amount,
             'status': 'pending',
             'payment_status': 'unpaid',
-            'pickup_location': booking.pickup_location,
-            'dropoff_location': booking.dropoff_location,
+            'payment_mode': booking.payment_mode,
+            'pickup_location': pickup_location,
+            'dropoff_location': dropoff_location,
             'created_at': firestore.SERVER_TIMESTAMP,
             'updated_at': firestore.SERVER_TIMESTAMP
         }
+        
+        # Add optional guest info
+        if booking.guest_name:
+            booking_data['guest_name'] = booking.guest_name
+        if booking.guest_email:
+            booking_data['guest_email'] = booking.guest_email
+        if booking.guest_phone:
+            booking_data['guest_phone'] = booking.guest_phone
+        if booking.daily_price:
+            booking_data['daily_price'] = booking.daily_price
         
         # Add quote_id if provided
         if booking.quote_id:
