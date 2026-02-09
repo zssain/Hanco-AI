@@ -1,0 +1,6 @@
+rental_length_days,day_of_week,month,base_daily_rate,avg_temp,rain,wind,avg_competitor_price,demand_index,bias,daily_price,branch_key,class_bucket,durationKey,providers_used_count
+3,0,1,150.0,25.0,0.0,10.0,150.0,0.5,1.0,155,riyadh-downtown,Sedan,,0
+3,0,1,150.0,25.0,0.0,10.0,150.0,0.5,1.0,95,riyadh-downtown,Economy,,0
+3,0,1,150.0,25.0,0.0,10.0,150.0,0.5,1.0,400,riyadh-downtown,Luxury,,0
+7,0,1,150.0,25.0,0.0,10.0,150.0,0.5,1.0,160,riyadh-airport,Sedan,,0
+3,0,1,150.0,25.0,0.0,10.0,150.0,0.5,1.0,255,riyadh-downtown,SUV,,0

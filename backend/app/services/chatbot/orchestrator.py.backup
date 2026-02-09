@@ -1,0 +1,777 @@
+"""
+Chatbot Orchestrator Service
+Handles conversation flow, intent detection, and service integration
+"""
+import logging
+import httpx
+import json
+import re
+from datetime import datetime, date
+from typing import Dict, List, Optional, Any
+from google.cloud import firestore
+
+from app.core.config import settings
+from app.services.pricing.feature_builder import build_pricing_features
+from app.services.pricing.onnx_runtime import predict_price
+
+logger = logging.getLogger(__name__)
+
+# Gemini API configuration
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
+# Intent types
+INTENTS = [
+    "greeting",
+    "faq",
+    "pricing_request",
+    "compare_competitors",
+    "booking_help",
+    "vehicle_inquiry",
+    "general_question"
+]
+
+
+async def detect_intent_and_extract(
+    user_message: str,
+    conversation_history: List[Dict],
+    use_gemini: bool = True
+) -> Dict[str, Any]:
+    """
+    Detect user intent and extract structured data using Gemini or OpenAI
+    
+    Args:
+        user_message: User's message
+        conversation_history: Previous conversation messages
+        use_gemini: Whether to use Gemini (True) or OpenAI (False)
+        
+    Returns:
+        Dictionary with:
+            - intent: Detected intent
+            - extracted: Structured data (city, dates, vehicle_category, etc.)
+            - confidence: Confidence score
+    """
+    try:
+        # Build context from conversation history
+        context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['message']}"
+            for msg in conversation_history[-5:]  # Last 5 messages
+        ])
+        
+        # Create prompt for intent detection and extraction
+        system_prompt = f"""You are an AI assistant for Hanco AI, a car rental service in Saudi Arabia.
+
+Your tasks:
+1. Detect the user's intent from these options: {', '.join(INTENTS)}
+2. Extract structured information when relevant:
+   - city: One of (riyadh, jeddah, dammam, mecca, medina, taif)
+   - start_date: Date in YYYY-MM-DD format
+   - end_date: Date in YYYY-MM-DD format
+   - vehicle_category: One of (economy, compact, sedan, suv, luxury)
+   - vehicle_selection: Specific vehicle name if mentioned (e.g., "honda accord", "toyota rav4")
+
+IMPORTANT CONTEXT RULES:
+- If conversation shows we asked for dates and user provides dates, extract them
+- If conversation shows available vehicles and user mentions a vehicle name, set intent to "booking_help" and extract vehicle_selection
+- If user says "book" + vehicle name, set intent to "pricing_request" to get pricing first
+- Look at previous assistant messages for context (city, dates, category)
+- If previous message showed vehicles in a city, inherit that city
+- If previous message asked for booking info with dates example, user's dates refer to that
+
+Conversation context:
+{context}
+
+User's latest message: {user_message}
+
+Respond ONLY with valid JSON in this exact format:
+{{
+  "intent": "one of the intent types",
+  "confidence": 0.0-1.0,
+  "extracted": {{
+    "city": "city name or null",
+    "start_date": "YYYY-MM-DD or null",
+    "end_date": "YYYY-MM-DD or null",
+    "vehicle_category": "category or null",
+    "vehicle_selection": "specific vehicle name or null"
+  }},
+  "reasoning": "brief explanation"
+}}"""
+
+        if use_gemini and hasattr(settings, 'GEMINI_API_KEY') and settings.GEMINI_API_KEY:
+            result = await _call_gemini(system_prompt)
+        elif hasattr(settings, 'OPENAI_API_KEY') and settings.OPENAI_API_KEY:
+            result = await _call_openai(system_prompt)
+        else:
+            # Fallback to simple rule-based detection
+            logger.warning("No AI API key configured, using rule-based intent detection")
+            result = _fallback_intent_detection(user_message)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Intent detection error: {str(e)}")
+        # Fallback
+        return _fallback_intent_detection(user_message)
+
+
+async def _call_gemini(prompt: str) -> Dict[str, Any]:
+    """Call Gemini API for intent detection"""
+    try:
+        api_key = settings.GEMINI_API_KEY if hasattr(settings, 'GEMINI_API_KEY') else None
+        
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not configured")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{GEMINI_API_URL}?key={api_key}",
+                json={
+                    "contents": [{
+                        "parts": [{
+                            "text": prompt
+                        }]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 500
+                    }
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
+                raise ValueError(f"Gemini API error: {response.status_code}")
+            
+            data = response.json()
+            
+            # Extract text from Gemini response
+            text = data['candidates'][0]['content']['parts'][0]['text']
+            
+            # Parse JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if json_match:
+                result = json.loads(json_match.group())
+                logger.info(f"Gemini detected intent: {result.get('intent')}")
+                return result
+            else:
+                raise ValueError("No JSON found in Gemini response")
+                
+    except Exception as e:
+        logger.error(f"Gemini API call failed: {str(e)}")
+        raise
+
+
+async def _call_openai(prompt: str) -> Dict[str, Any]:
+    """Call OpenAI API for intent detection"""
+    try:
+        api_key = settings.OPENAI_API_KEY if hasattr(settings, 'OPENAI_API_KEY') else None
+        
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not configured")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                OPENAI_API_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-3.5-turbo",
+                    "messages": [
+                        {"role": "system", "content": prompt}
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 500
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+                raise ValueError(f"OpenAI API error: {response.status_code}")
+            
+            data = response.json()
+            text = data['choices'][0]['message']['content']
+            
+            # Parse JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if json_match:
+                result = json.loads(json_match.group())
+                logger.info(f"OpenAI detected intent: {result.get('intent')}")
+                return result
+            else:
+                raise ValueError("No JSON found in OpenAI response")
+                
+    except Exception as e:
+        logger.error(f"OpenAI API call failed: {str(e)}")
+        raise
+
+
+def _fallback_intent_detection(user_message: str) -> Dict[str, Any]:
+    """Rule-based fallback intent detection"""
+    message_lower = user_message.lower()
+    
+    # Greeting patterns
+    greeting_patterns = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'greetings']
+    if any(pattern in message_lower for pattern in greeting_patterns):
+        return {
+            "intent": "greeting",
+            "confidence": 0.8,
+            "extracted": {},
+            "reasoning": "Greeting detected"
+        }
+    
+    # Pricing patterns
+    pricing_patterns = ['price', 'cost', 'how much', 'rate', 'daily rate', 'rental price']
+    if any(pattern in message_lower for pattern in pricing_patterns):
+        return {
+            "intent": "pricing_request",
+            "confidence": 0.7,
+            "extracted": _extract_basic_info(user_message),
+            "reasoning": "Pricing keywords detected"
+        }
+    
+    # Competitor comparison patterns
+    competitor_patterns = ['compare', 'budget', 'hertz', 'yelo', 'lumi', 'competitor', 'cheaper', 'best deal']
+    if any(pattern in message_lower for pattern in competitor_patterns):
+        return {
+            "intent": "compare_competitors",
+            "confidence": 0.7,
+            "extracted": _extract_basic_info(user_message),
+            "reasoning": "Competitor comparison keywords detected"
+        }
+    
+    # Booking patterns
+    booking_patterns = ['book', 'reserve', 'rent', 'availability', 'available']
+    if any(pattern in message_lower for pattern in booking_patterns):
+        return {
+            "intent": "booking_help",
+            "confidence": 0.7,
+            "extracted": _extract_basic_info(user_message),
+            "reasoning": "Booking keywords detected"
+        }
+    
+    # Vehicle inquiry
+    vehicle_patterns = ['vehicle', 'car', 'suv', 'sedan', 'economy', 'luxury', 'what cars']
+    if any(pattern in message_lower for pattern in vehicle_patterns):
+        return {
+            "intent": "vehicle_inquiry",
+            "confidence": 0.6,
+            "extracted": _extract_basic_info(user_message),
+            "reasoning": "Vehicle inquiry keywords detected"
+        }
+    
+    # Default to general question
+    return {
+        "intent": "general_question",
+        "confidence": 0.5,
+        "extracted": {},
+        "reasoning": "No specific pattern matched"
+    }
+
+
+def _extract_basic_info(message: str) -> Dict[str, Optional[str]]:
+    """Extract basic info using regex patterns"""
+    extracted = {
+        "city": None,
+        "start_date": None,
+        "end_date": None,
+        "vehicle_category": None
+    }
+    
+    message_lower = message.lower()
+    
+    # Extract city
+    cities = ['riyadh', 'jeddah', 'dammam', 'mecca', 'medina', 'taif']
+    for city in cities:
+        if city in message_lower:
+            extracted['city'] = city
+            break
+    
+    # Extract vehicle category
+    categories = ['economy', 'sedan', 'suv', 'luxury']
+    for category in categories:
+        if category in message_lower:
+            extracted['vehicle_category'] = category
+            break
+    
+    # Extract dates (basic pattern matching)
+    date_pattern = r'\d{4}-\d{2}-\d{2}'
+    dates = re.findall(date_pattern, message)
+    if len(dates) >= 2:
+        extracted['start_date'] = dates[0]
+        extracted['end_date'] = dates[1]
+    elif len(dates) == 1:
+        extracted['start_date'] = dates[0]
+    
+    return extracted
+
+
+async def get_pricing_info(
+    city: str,
+    start_date: str,
+    end_date: str,
+    vehicle_category: str,
+    firestore_client
+) -> Dict[str, Any]:
+    """Get pricing information and competitor comparison"""
+    try:
+        # Convert dates
+        start = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end = datetime.strptime(end_date, '%Y-%m-%d').date()
+        
+        # Get a sample vehicle from the category
+        vehicles_ref = firestore_client.collection('vehicles')
+        vehicle_query = vehicles_ref.where('category', '==', vehicle_category).limit(1).stream()
+        
+        vehicle_doc = None
+        for doc in vehicle_query:
+            vehicle_doc = doc.to_dict()
+            break
+        
+        if not vehicle_doc:
+            return {
+                "error": f"No vehicles found in {vehicle_category} category",
+                "recommended_price": None,
+                "competitor_prices": []
+            }
+        
+        # Build pricing features
+        features = await build_pricing_features(
+            vehicle_doc=vehicle_doc,
+            start_date=start,
+            end_date=end,
+            city=city,
+            firestore_client=firestore_client
+        )
+        
+        # Get recommended price
+        daily_price = predict_price(features)
+        rental_days = (end - start).days
+        total_price = daily_price * rental_days
+        
+        # Get competitor prices
+        competitor_ref = firestore_client.collection('competitor_prices')
+        competitor_query = competitor_ref\
+            .where('city', '==', city)\
+            .where('category', '==', vehicle_category)\
+            .limit(10)\
+            .stream()
+        
+        competitor_prices = []
+        for doc in competitor_query:
+            data = doc.to_dict()
+            competitor_prices.append({
+                'provider': data.get('provider'),
+                'price': data.get('price'),
+                'vehicle_name': data.get('vehicle_name')
+            })
+        
+        return {
+            "recommended_price": {
+                "daily_rate": round(daily_price, 2),
+                "total_price": round(total_price, 2),
+                "rental_days": rental_days
+            },
+            "competitor_prices": competitor_prices,
+            "weather": {
+                "avg_temp": features.get('avg_temp'),
+                "rain": features.get('rain'),
+                "wind": features.get('wind')
+            },
+            "demand_index": features.get('demand_index', 0.5)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting pricing info: {str(e)}")
+        return {
+            "error": str(e),
+            "recommended_price": None,
+            "competitor_prices": []
+        }
+
+
+async def generate_reply(
+    intent: str,
+    extracted: Dict,
+    pricing_info: Optional[Dict],
+    user_message: str,
+    firestore_client = None
+) -> str:
+    """Generate natural language reply based on intent and context"""
+    
+    if intent == "greeting":
+        return ("Hello! Welcome to Hanco AI. I'm here to help you find the perfect car rental. "
+                "You can ask me about pricing, compare our rates with competitors, check vehicle availability, "
+                "or get help with booking. What would you like to know?")
+    
+    elif intent == "pricing_request" and pricing_info and pricing_info.get('recommended_price'):
+        price_data = pricing_info['recommended_price']
+        city = extracted.get('city', 'your location')
+        category = extracted.get('vehicle_category', 'vehicle')
+        vehicle_name = extracted.get('vehicle_selection', category)
+        
+        reply = f"**{vehicle_name.title()} Pricing**\n\n"
+        reply += f"📍 Location: {city.title()}\n"
+        reply += f"💰 Daily Rate: {price_data['daily_rate']} SAR\n"
+        reply += f"📅 Total ({price_data['rental_days']} days): {price_data['total_price']} SAR\n\n"
+        
+        # Weather context
+        weather = pricing_info.get('weather', {})
+        if weather.get('avg_temp'):
+            reply += f"🌡️ Weather: {weather['avg_temp']}°C"
+            if weather.get('rain', 0) > 0:
+                reply += f", {weather['rain']}mm rain expected"
+            reply += "\n\n"
+        
+        # Demand context
+        demand = pricing_info.get('demand_index', 0.5)
+        if demand > 0.7:
+            reply += "⚠️ High demand period - book early!\n\n"
+        
+        # Competitor comparison
+        competitors = pricing_info.get('competitor_prices', [])
+        if competitors:
+            reply += "**Competitor Comparison:**\n"
+            for comp in competitors[:3]:
+                reply += f"• {comp['provider'].title()}: {comp['price']} SAR/day\n"
+            
+            avg_competitor = sum(c['price'] for c in competitors) / len(competitors)
+            our_price = price_data['daily_rate']
+            
+            if our_price < avg_competitor:
+                diff = avg_competitor - our_price
+                reply += f"\n✅ You save {diff:.2f} SAR/day with us!\n\n"
+            else:
+                reply += "\n💎 Premium service included!\n\n"
+        
+        reply += "Ready to book? Click below to proceed to payment:\n"
+        reply += f"🔗 [Book Now](/booking?vehicle={vehicle_name}&city={city}&start={extracted.get('start_date')}&end={extracted.get('end_date')})"
+        
+        return reply
+    
+    elif intent == "compare_competitors" and pricing_info and pricing_info.get('competitor_prices'):
+        competitors = pricing_info['competitor_prices']
+        
+        if not competitors:
+            return "I don't have recent competitor pricing data for this search. However, our AI-powered pricing ensures you get competitive rates!"
+        
+        reply = "Here's how we compare to competitors:\n\n"
+        
+        for comp in competitors[:4]:  # Top 4 competitors
+            reply += f"🏢 {comp['provider'].title()}: {comp['price']} SAR/day"
+            if comp.get('vehicle_name'):
+                reply += f" ({comp['vehicle_name']})"
+            reply += "\n"
+        
+        if pricing_info.get('recommended_price'):
+            our_price = pricing_info['recommended_price']['daily_rate']
+            avg_competitor = sum(c['price'] for c in competitors) / len(competitors)
+            
+            if our_price < avg_competitor:
+                diff = avg_competitor - our_price
+                reply += f"\n✅ Our price is {diff:.2f} SAR/day lower than the average!"
+            elif our_price > avg_competitor:
+                diff = our_price - avg_competitor
+                reply += f"\n💡 Our price includes premium service worth the {diff:.2f} SAR/day difference!"
+            else:
+                reply += "\n✅ We're competitively priced!"
+        
+        return reply
+    
+    elif intent == "booking_help":
+        # Check if user selected a specific vehicle
+        vehicle_selection = extracted.get('vehicle_selection')
+        
+        if vehicle_selection and pricing_info:
+            # User selected a vehicle and we have pricing - show pricing
+            return await generate_reply("pricing_request", extracted, pricing_info, user_message, firestore_client)
+        
+        missing_fields = []
+        
+        if not extracted.get('city'):
+            missing_fields.append("city")
+        if not extracted.get('start_date'):
+            missing_fields.append("start date")
+        if not extracted.get('end_date'):
+            missing_fields.append("end date")
+        if not extracted.get('vehicle_category') and not vehicle_selection:
+            missing_fields.append("vehicle category")
+        
+        if missing_fields:
+            return (f"I'd be happy to help you book! To get started, I need the following information:\n\n"
+                   f"❓ {', '.join(missing_fields)}\n\n"
+                   f"For example: 'I need a sedan in Riyadh from 2025-12-10 to 2025-12-15'")
+        else:
+            return ("Great! I have all the information needed. Let me get you a price quote. "
+                   "After that, I can guide you through the booking process.")
+    
+    elif intent == "vehicle_inquiry":
+        # Fetch actual vehicles from Firestore
+        try:
+            vehicles_ref = firestore_client.collection('vehicles')
+            category = extracted.get('vehicle_category')
+            city = extracted.get('city')
+            
+            # Build query
+            query = vehicles_ref
+            if category:
+                # Normalize category (compact, sedan, suv, luxury)
+                category_map = {
+                    'economy': 'Compact',
+                    'compact': 'Compact', 
+                    'sedan': 'Sedan',
+                    'suv': 'SUV',
+                    'luxury': 'Luxury'
+                }
+                firestore_category = category_map.get(category.lower(), category.title())
+                query = query.where('category', '==', firestore_category)
+            
+            if city:
+                query = query.where('city', '==', city.title())
+            
+            # Limit to 5 vehicles
+            query = query.where('availability_status', '==', 'available').limit(5)
+            
+            vehicles_docs = query.stream()
+            vehicles = []
+            for doc in vehicles_docs:
+                data = doc.to_dict()
+                vehicles.append({
+                    'name': data.get('name'),
+                    'category': data.get('category'),
+                    'price': data.get('current_price', data.get('base_daily_rate')),
+                    'city': data.get('city')
+                })
+            
+            if vehicles:
+                # Group by category
+                by_category = {}
+                for v in vehicles:
+                    cat = v['category']
+                    if cat not in by_category:
+                        by_category[cat] = []
+                    by_category[cat].append(v)
+                
+                reply = "Here are our available vehicles:\n\n"
+                
+                category_emojis = {
+                    'Compact': '🚗',
+                    'Sedan': '🚙',
+                    'SUV': '🚐',
+                    'Luxury': '💎'
+                }
+                
+                for cat, cat_vehicles in by_category.items():
+                    emoji = category_emojis.get(cat, '🚗')
+                    reply += f"{emoji} **{cat}**\n"
+                    for v in cat_vehicles:
+                        reply += f"  • {v['name']} - {v['price']} SAR/day ({v['city']})\n"
+                    reply += "\n"
+                
+                reply += "Which one interests you?"
+                return reply
+            else:
+                # Fallback to category overview
+                return ("We offer a wide range of vehicles:\n\n"
+                       "🚗 Compact: Affordable cars (Toyota Corolla, Hyundai Elantra)\n"
+                       "🚙 Sedan: Comfortable mid-size (Honda Accord, Nissan Altima)\n"
+                       "🚐 SUV: Spacious family vehicles (Nissan Patrol, Toyota Land Cruiser)\n"
+                       "💎 Luxury: Premium vehicles (Mercedes, BMW)\n\n"
+                       "Which category interests you?")
+        except Exception as e:
+            logger.error(f"Error fetching vehicles: {e}")
+            return ("We offer a wide range of vehicles:\n\n"
+                   "🚗 Compact: Affordable cars\n"
+                   "🚙 Sedan: Comfortable mid-size\n"
+                   "🚐 SUV: Spacious family vehicles\n"
+                   "💎 Luxury: Premium vehicles\n\n"
+                   "Which category interests you?")
+    
+    elif intent == "faq":
+        return ("I can help you with:\n\n"
+               "📝 Booking a vehicle\n"
+               "💰 Getting price quotes\n"
+               "🏢 Comparing with competitors\n"
+               "🚗 Learning about our vehicle fleet\n"
+               "📍 Available locations: Riyadh, Jeddah, Dammam, Mecca, Medina, Taif\n\n"
+               "What would you like to know more about?")
+    
+    else:
+        return ("I'm here to help with car rentals in Saudi Arabia! You can ask me about:\n\n"
+               "• Pricing and availability\n"
+               "• Comparing rates with competitors\n"
+               "• Our vehicle selection\n"
+               "• Booking assistance\n\n"
+               "How can I assist you today?")
+
+
+async def handle_message(
+    session_id: str,
+    user_message: str,
+    user: Dict,
+    firestore_client
+) -> Dict[str, Any]:
+    """
+    Main orchestrator for handling chat messages
+    
+    Args:
+        session_id: Chat session ID
+        user_message: User's message
+        user: User dictionary with user info
+        firestore_client: Firestore client
+        
+    Returns:
+        Dictionary with:
+            - reply: Assistant's response
+            - intent: Detected intent
+            - extracted: Extracted structured data
+            - session_id: Session ID
+    """
+    try:
+        logger.info(f"Processing message for session {session_id}: {user_message[:50]}...")
+        
+        # Load conversation history (simplified query to avoid index requirement)
+        conversation_history = []
+        try:
+            messages_ref = firestore_client.collection('chat_messages')
+            # Use simple where filter, then sort in Python to avoid composite index
+            history_docs = messages_ref.where('session_id', '==', session_id).stream()
+            
+            # Collect and sort in Python
+            all_messages = []
+            for doc in history_docs:
+                msg = doc.to_dict()
+                all_messages.append({
+                    'role': msg.get('role'),
+                    'message': msg.get('message'),
+                    'timestamp': msg.get('timestamp')
+                })
+            
+            # Sort by timestamp and limit to last 20
+            conversation_history = sorted(
+                all_messages, 
+                key=lambda x: x.get('timestamp', datetime.min)
+            )[-20:]
+        except Exception as e:
+            logger.warning(f"Could not load conversation history: {e}. Continuing without history.")
+            conversation_history = []
+        
+        # Detect intent and extract information
+        intent_result = await detect_intent_and_extract(
+            user_message,
+            conversation_history
+        )
+        
+        intent = intent_result.get('intent', 'general_question')
+        extracted = intent_result.get('extracted', {})
+        
+        # Enrich extracted data from conversation context
+        if conversation_history:
+            # Look for missing fields in previous messages
+            for msg in reversed(conversation_history):
+                if msg['role'] == 'assistant':
+                    msg_text = msg['message'].lower()
+                    
+                    # Extract city from previous context
+                    if not extracted.get('city'):
+                        for city in ['riyadh', 'jeddah', 'dammam', 'mecca', 'medina', 'taif']:
+                            if city in msg_text:
+                                extracted['city'] = city
+                                break
+                    
+                    # Extract dates from booking request examples
+                    if not extracted.get('start_date') or not extracted.get('end_date'):
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})', msg_text)
+                        if date_match and not extracted.get('start_date'):
+                            extracted['start_date'] = date_match.group(1)
+                            extracted['end_date'] = date_match.group(2)
+                    
+                    # Extract vehicle category from context
+                    if not extracted.get('vehicle_category'):
+                        for cat in ['sedan', 'suv', 'luxury', 'compact', 'economy']:
+                            if cat in msg_text:
+                                extracted['vehicle_category'] = cat
+                                break
+        
+        # If user says specific dates, parse them
+        user_lower = user_message.lower()
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})', user_lower)
+        if date_match:
+            extracted['start_date'] = date_match.group(1)
+            extracted['end_date'] = date_match.group(2)
+        
+        logger.info(f"Detected intent: {intent}, extracted (enriched): {extracted}")
+        
+        # Get pricing info if needed
+        pricing_info = None
+        if intent in ['pricing_request', 'compare_competitors', 'booking_help']:
+            # Check if we have all required fields
+            if (extracted.get('city') and 
+                extracted.get('start_date') and 
+                extracted.get('end_date') and 
+                (extracted.get('vehicle_category') or extracted.get('vehicle_selection'))):
+                
+                pricing_info = await get_pricing_info(
+                    city=extracted['city'],
+                    start_date=extracted['start_date'],
+                    end_date=extracted['end_date'],
+                    vehicle_category=extracted['vehicle_category'],
+                    firestore_client=firestore_client
+                )
+        
+        # Generate reply
+        reply = await generate_reply(intent, extracted, pricing_info, user_message, firestore_client)
+        
+        # Save user message
+        user_msg_ref = messages_ref.document()
+        user_msg_ref.set({
+            'session_id': session_id,
+            'role': 'user',
+            'message': user_message,
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'user_id': user.get('uid') if user else None
+        })
+        
+        # Save assistant message
+        assistant_msg_ref = messages_ref.document()
+        assistant_msg_ref.set({
+            'session_id': session_id,
+            'role': 'assistant',
+            'message': reply,
+            'intent': intent,
+            'extracted': extracted,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
+        
+        # Update session last activity
+        session_ref = firestore_client.collection('chat_sessions').document(session_id)
+        session_ref.set({
+            'user_id': user.get('uid') if user else None,
+            'last_message': user_message[:100],
+            'last_activity': firestore.SERVER_TIMESTAMP,
+            'message_count': firestore.Increment(2)
+        }, merge=True)
+        
+        logger.info(f"✅ Message processed successfully for session {session_id}")
+        
+        return {
+            "reply": reply,
+            "intent": intent,
+            "extracted": extracted,
+            "session_id": session_id,
+            "pricing_info": pricing_info
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling message: {str(e)}")
+        
+        # Return error response
+        return {
+            "reply": "I apologize, but I encountered an error processing your request. Please try again.",
+            "intent": "error",
+            "extracted": {},
+            "session_id": session_id,
+            "error": str(e)
+        }
+

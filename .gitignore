@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.production
+.env.production.local
+.env.development.local
+
+# Firebase - Keep example files, ignore actual credentials
+firebase-service-account.json
+*-firebase-adminsdk-*.json
+firebase-key.json
+hanco-*.json
+*-firebase-*.json
+
+# Secrets and API Keys
+*.pem
+*.key
+secrets/
+*.secret
+*-key.json
+serviceAccountKey.json
+
+# Platform-specific deployment configs with secrets
+vercel.json
+.vercel
+.vercelignore
+render.yaml
+railway.json
+.railway
+
+# ML Models
+*.onnx
+*.pkl
+*.joblib
+
+# Logs
+*.log
+logs/
+
+# AWS
+.aws/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/

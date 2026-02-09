@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: hanco-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEBUG=${DEBUG:-False}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/firebase-key.json
+    volumes:
+      - ./backend/firebase-key.json:/app/firebase-key.json:ro
+    restart: unless-stopped
+    networks:
+      - hanco-network
+
+  frontend:
+    build: 
+      context: ./frontend
+      args:
+        - VITE_API_URL=/api
+    container_name: hanco-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - hanco-network
+
+networks:
+  hanco-network:
+    driver: bridge

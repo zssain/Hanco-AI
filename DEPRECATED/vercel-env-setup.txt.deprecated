@@ -1,0 +1,39 @@
+VERCEL FRONTEND ENVIRONMENT VARIABLES
+Copy and paste these into Vercel Dashboard → Settings → Environment Variables
+
+Variable Name: VITE_FIREBASE_API_KEY
+Value: AIzaSyDN-oN9cYL_DqMGBc7g2MQ0v2xMNw7YQOo
+
+Variable Name: VITE_FIREBASE_AUTH_DOMAIN
+Value: hanco-ai.firebaseapp.com
+
+Variable Name: VITE_FIREBASE_PROJECT_ID
+Value: hanco-ai
+
+Variable Name: VITE_FIREBASE_STORAGE_BUCKET
+Value: hanco-ai.firebasestorage.app
+
+Variable Name: VITE_FIREBASE_MESSAGING_SENDER_ID
+Value: 803353116256
+
+Variable Name: VITE_FIREBASE_APP_ID
+Value: 1:803353116256:web:5d44a78a854be71c60bcfa
+
+Variable Name: VITE_FIREBASE_MEASUREMENT_ID
+Value: G-YY05MMHP9Y
+
+Variable Name: VITE_API_BASE_URL
+Value: https://hanco-backend-production.up.railway.app
+
+IMPORTANT: 
+1. Add each variable separately in Vercel
+2. Make sure to enable for Production, Preview, AND Development
+3. After adding all variables, REDEPLOY the frontend
+
+Steps:
+1. Go to https://vercel.com/dashboard
+2. Click on "hanco-rent-a-car" project
+3. Go to Settings → Environment Variables
+4. Click "Add" for each variable above
+5. After adding all, go to Deployments tab
+6. Click "..." on latest deployment → "Redeploy"
