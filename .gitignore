@@ -31,13 +31,11 @@ yarn-error.log*
 dist/
 build/
 
-# Environment variables
+# Environment variables (ignore all real env files, keep .env.example templates)
 .env
-.env.local
-.env.*.local
-.env.production
-.env.production.local
-.env.development.local
+.env.*
+!.env.example
+!*.env.example
 
 # Firebase - Keep example files, ignore actual credentials
 firebase-service-account.json

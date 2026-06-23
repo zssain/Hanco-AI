@@ -12,6 +12,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import logging
+import os
 import time
 from typing import Callable
 
@@ -59,16 +60,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Firebase initialization error: {e}")
     
-    # Start background scheduler for competitor scraping and price updates
-    try:
-        from app.core.scheduler import start_scheduler, get_scheduler_status
-        start_scheduler()
-        status = get_scheduler_status()
-        logger.info(f"📅 Background Scheduler: {status['status']}")
-        for job in status.get('jobs', []):
-            logger.info(f"   └─ {job['name']}: next run at {job.get('next_run', 'N/A')}")
-    except Exception as e:
-        logger.warning(f"⚠️ Background scheduler failed to start: {e}")
+    # Start background scheduler for competitor scraping and price updates.
+    # Disabled by default: in scale-to-zero / serverless deployments (e.g. Azure
+    # Container Apps) the in-process scheduler can't run reliably, so scraping is
+    # driven by a separate cron job (python -m app.workers.scrape_competitors).
+    # Set ENABLE_SCHEDULER=true to run the in-process scheduler (e.g. a single
+    # always-on instance or local dev).
+    if os.getenv("ENABLE_SCHEDULER", "false").lower() == "true":
+        try:
+            from app.core.scheduler import start_scheduler, get_scheduler_status
+            start_scheduler()
+            status = get_scheduler_status()
+            logger.info(f"📅 Background Scheduler: {status['status']}")
+            for job in status.get('jobs', []):
+                logger.info(f"   └─ {job['name']}: next run at {job.get('next_run', 'N/A')}")
+        except Exception as e:
+            logger.warning(f"⚠️ Background scheduler failed to start: {e}")
+    else:
+        logger.info("📅 Background Scheduler disabled (ENABLE_SCHEDULER!=true); scraping runs via external cron job")
     
     logger.info("✅ Application startup complete")
     

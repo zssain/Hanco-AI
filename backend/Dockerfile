@@ -29,9 +29,11 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
+# Install Playwright browser binary. System dependencies are installed manually
+# above; we intentionally skip `playwright install-deps` because it references
+# obsolete Debian font packages (ttf-unifont/ttf-ubuntu-font-family) that fail
+# to install on python:3.11-slim.
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 # Copy application
 COPY . .

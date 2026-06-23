@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /home/mehtab/Hanco-AI show 8ceb6a0 --name-only)"
+    ]
+  }
+}
